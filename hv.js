@@ -31,9 +31,16 @@ function loadHyperVTypes() {
   g_isSymbolsLoaded = true; // Cache
 }
 
-// For 25H2
-const VMCS_OFFSET_FROM_GS_BASE = 0x2c680;
-const VIRTUAL_PROCESSOR_OFFSET_FROM_GS_BASE = 0x358;
+// GS offsets for 24H2, 25H2.
+// These offset found be reverse engineering hvix64.exe.
+const HV_GS_SELF_OFFSET = 0x0; // Also can be found under the current VMCS' `HostGsBase` field.
+const HV_GS_CURRENT_VMCS_OFFSET = 0x2c680;
+const HV_GS_CURRENT_VIRTUAL_PROCESSOR_OFFSET = 0x358;
+const HV_CURRENT_CR3_OFFSET = 0x458; // Also can be found under the current VMCS' `HostCr3` field.
+const HV_GS_IDT_BASE_OFFSE = 0x440;
+const HV_GS_GDT_BASE_OFFSE = 0x448;
+
+// More offsets for 24H2, 25H2
 const VTL_OFFSET_FROM_VIRTUAL_PROCESSOR = 0x3c0;
 
 // Globals
@@ -60,14 +67,14 @@ function getGsBase() {
 
 function getCurrentVtlNumber() {
   const gsBase = getGsBase();
-  const vp_address = u64(gsBase.add(VIRTUAL_PROCESSOR_OFFSET_FROM_GS_BASE));
+  const vp_address = u64(gsBase.add(HV_GS_CURRENT_VIRTUAL_PROCESSOR_OFFSET));
   const vtl_number = u8(vp_address.add(VTL_OFFSET_FROM_VIRTUAL_PROCESSOR));
   return vtl_number;
 }
 
 function getCurrentVmcs() {
   const gsBase = getGsBase();
-  const vmcs_address = u64(gsBase.add(VMCS_OFFSET_FROM_GS_BASE));
+  const vmcs_address = u64(gsBase.add(HV_GS_CURRENT_VMCS_OFFSET));
 
   loadHyperVTypes();
   return host.namespace.Debugger.Utility.Analysis.SyntheticTypes.CreateInstance(
