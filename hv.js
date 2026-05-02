@@ -94,12 +94,14 @@ function getCurrentVtl() {
   return vtl;
 }
 
+
 function getVtlsList() {
     let VirtualProcessor = getCurrentVirtualProcessor();
     let vtlsListDoublePointer = VirtualProcessor.add(VTL_ARRAY_OFFSET_FROM_VIRTUAL_PROCESSOR);
 
-    // since there are currently only 2 VTLs (VTL0 & VTL1) supported
-    // the function will iterate only on these 2
+    // Since there are currently only 2 VTLs (VTL0 & VTL1) supported, the function will iterate only on 2 VTLs.
+    // but we can get per the number of active VTLs per VP - by reading
+    // HvRegisterVsmVpStatus.EnabledVtlSet bitmask field
     for (let index = 0; index < 2; index++)
     {
       let vtl = u64(vtlsListDoublePointer.add(8 * index));
@@ -139,11 +141,13 @@ function getVmcsAddressesList()
   
   host.diagnostics.debugLog("\n");
 
-  // Hardcoding the number of VTLs since we know that are 2 VTLs.
+  // Hardcoding the number of VTLs since we know there are 2 VTLs.
+  // We can get the exact number of active VTLs in 2 ways:
+  //   1. Partition-wide active VTLs - by reading HvRegisterVsmPartitionStatus.EnabledVtlSet bitmask field
+  //   2. Per Virtual Processor active VTLs - by reading HvRegisterVsmVpStatus.EnabledVtlSet bitmask field
   for(let index = 0; index < 2; index++)
   {
     let vtl = u64(vtlsListDoublePointer.add(8 * index));
-    
     let vtlStateRegion = vtl.add(VTL_STATE_REGION_OFFSET_FROM_HV_VTL);
     let vmcsInfo = vtlStateRegion.add(VMCS_INFO_STRUCTURE_OFFSET_FROM_VTL_STATE_REGION);
 
