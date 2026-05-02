@@ -125,7 +125,7 @@ function getVpsList()
     let vpsListPointer = u64(currentParition.add(VP_ARRAY_OFFSET_FROM_HV_PARTITION));
 
     host.diagnostics.debugLog("\t[*] current Partition: 0x", currentParition.toString(16), "\n")
-    host.diagnostics.debugLog("\t[*] Number Of Virtual Processor: 0x", numberOfVps.toString(8), "\n")
+    host.diagnostics.debugLog("\t[*] Number Of Virtual Processors: 0x", numberOfVps.toString(8), "\n")
 
     for (let index = 0; index < numberOfVps; index++)
     {
