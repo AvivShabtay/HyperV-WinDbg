@@ -11,8 +11,8 @@ function bits(value, offset, size) {
 
 // Symbol Files
 const SYMBOLS_FILE_PATHS = [
-  "C:\\Dev\\HyperV-WinDbg\\HyperV-WinDbg\\VMCS.h",
-  "C:\\Dev\\HyperV-WinDbg\\HyperV-WinDbg\\EPT.h",
+  "C:\\Dev\\HyperV-WinDbg\\VMCS.h",
+  "C:\\Dev\\HyperV-WinDbg\\EPT.h",
 ];
 
 let g_isSymbolsLoaded = false;
