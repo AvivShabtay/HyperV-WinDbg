@@ -86,7 +86,7 @@ function getCurrentVirtualProcessor() {
   return vp_address;
 }
 
-// Returns a HV_VTL structure represeting a VTL
+// Returns a HV_VTL structure (represeting a VTL) base address
 function getCurrentVtl() {
   const gsBase = getGsBase();
   const vp_address = u64(gsBase.add(VIRTUAL_PROCESSOR_OFFSET_FROM_GS_BASE));
@@ -94,21 +94,23 @@ function getCurrentVtl() {
   return vtl;
 }
 
-
 function getVtlsList() {
     let VirtualProcessor = getCurrentVirtualProcessor();
     let vtlsListDoublePointer = VirtualProcessor.add(VTL_ARRAY_OFFSET_FROM_VIRTUAL_PROCESSOR);
+    return vtlsListDoublePointer;
+}
+
+function printVtlsList() {
+    let vtls = getVtlsList();
 
     // Since there are currently only 2 VTLs (VTL0 & VTL1) supported, the function will iterate only on 2 VTLs.
     // but we can get per the number of active VTLs per VP - by reading
     // HvRegisterVsmVpStatus.EnabledVtlSet bitmask field
     for (let index = 0; index < 2; index++)
     {
-      let vtl = u64(vtlsListDoublePointer.add(8 * index));
-      let strVtlAddress  = vtl.toString(16);
-      host.diagnostics.debugLog("\t[*] VTL[", index, "]: 0x", strVtlAddress, "\n")
+      let vtl = u64(vtls.add(8 * index));
+      log(`\t[*] VTL[${index}]: 0x${vtl.toString(16)}`)
     }
-    return vtlsListDoublePointer;
 }
 
 function getCurrentPartition()
@@ -117,29 +119,26 @@ function getCurrentPartition()
   return u64(gsBase.add(HV_PARTITION_OFFSET_FROM_GS_BASE));
 }
 
-// prints a list of Virtual Processors that are under the current partition
+// prints a list of Virtual Processor structure's base addresses that are under the current partition
 function getVpsList()
 {
     let currentParition = getCurrentPartition();
     let numberOfVps = u32(currentParition.add(NUMBER_OF_VPS_OFFSET_FROM_HV_PARTITION));
     let vpsListPointer = u64(currentParition.add(VP_ARRAY_OFFSET_FROM_HV_PARTITION));
 
-    host.diagnostics.debugLog("\t[*] current Partition: 0x", currentParition.toString(16), "\n")
-    host.diagnostics.debugLog("\t[*] Number Of Virtual Processors: 0x", numberOfVps.toString(8), "\n")
+    log(`\t[*] current Partition: 0x${currentParition.toString(16)}`)
+    log(`\t[*] Number Of Virtual Processors: 0x${numberOfVps.toString(8)}\n`)
 
     for (let index = 0; index < numberOfVps; index++)
     {
       let vp = u64(currentParition.add(VP_ARRAY_OFFSET_FROM_HV_PARTITION + 8 * index));
-      let strVpAddress  = vp.toString(16);
-      host.diagnostics.debugLog("\t[*] VP[", index, "]: 0x", strVpAddress, "\n")
+      log(`\t[*] Virtual Processor[${index}]: 0x${vp.toString(16)}\n`)
     }
 }
 
 function getVmcsAddressesList() 
 {
   let vtlsListDoublePointer = getVtlsList();
-  
-  host.diagnostics.debugLog("\n");
 
   // Hardcoding the number of VTLs since we know there are 2 VTLs.
   // We can get the exact number of active VTLs in 2 ways:
@@ -154,9 +153,9 @@ function getVmcsAddressesList()
     const vmcsVirtualAddress = u64(u64(vmcsInfo).add(VMCS_VIRTUAL_ADDRESS_OFFSET_FROM_VMCS_INFO_STRUCTURE));
     const vmcsPhysicalAddress = u64(u64(vmcsInfo).add(VMCS_PHYSICAL_ADDRESS_OFFSET_FROM_VMCS_INFO_STRUCTURE));
 
-    host.diagnostics.debugLog("VTL[", index, "]:\n");
-    host.diagnostics.debugLog("\t[*] VMCS Virtual Address = 0x", vmcsVirtualAddress.toString(16), "\n");
-    host.diagnostics.debugLog("\t[*] VMCS Physical Address = 0x", vmcsPhysicalAddress.toString(16), "\n");
+    log(`\t[*] VTL[${index}]:`);
+    log(`\t\t[*] VMCS Virtual Address = 0x${vmcsVirtualAddress.toString(16)}`);
+    log(`\t\t[*] VMCS Physical Address = 0x${vmcsPhysicalAddress.toString(16)}\n`);
   }
 }
 
@@ -169,13 +168,6 @@ function getCurrentVmcs() {
     "HV_VMX_ENLIGHTENED_VMCS",
     vmcs_address,
   );
-}
-
-// Returns the _HV_REGISTER_VSM_VP_SECURE_VTL_CONFIG value of a VTL
-// The arithmetic operations were researched in HvCallGetVpRegister() hypercall
-function getVsmSecureConfigVtlValue()
-{
-  // TODO: will be implemented soon
 }
 
 function getCurrentEptPointer() {
@@ -244,15 +236,15 @@ function gpa2Hpa(gpa) {
 
 function printUsage() {
   log(" HyperV Research Tools:");
-  log("   !gpa2hpa <gpa>      ");
-  log("   !vmcs               ");
-  log("   !vtlnumber          ");
-  log("   !currentvp          ");
-  log("   !currentpartition   ");
-  log("   !currentvtl         ");
-  log("   !vtls               ");
-  log("   !vps                ");
-  log("   !vmcslist           ");
+  log("   !gpa2hpa <gpa>  - Translates GPA to SPA");
+  log("   !vmcs           - Prints the current active VMCS base address on logical processor");
+  log("   !vtlnumber      - Prints the active VTL's VTL number");
+  log("   !currentvp      - Prints the current Virtual Processor's HV_VP data structure base address");
+  log("   !partition      - Prints the current partition's HV_PARTITION data structure base address");
+  log("   !currentvtl     - Prints the current VTL's HV_VTL data structure base address");
+  log("   !vtls           - Prints all the existing VTL's HV_VTL data structure base addresses");
+  log("   !vps            - Prints all the existing VPs HV_VP data structure base addresses");
+  log("   !vmcslist       - Prints a list of all VMCSes Virtual and Physical addresses");
 }
 
 function initializeScript() {
@@ -264,8 +256,8 @@ function initializeScript() {
     new host.functionAlias(getCurrentVtlNumber, "vtlnumber"),
     new host.functionAlias(getCurrentVirtualProcessor, "currentvp"),
     new host.functionAlias(getCurrentVtl, "currentvtl"),
-    new host.functionAlias(getVtlsList, "vtls"),
-    new host.functionAlias(getCurrentPartition, "currentpartition"),
+    new host.functionAlias(printVtlsList, "vtls"),
+    new host.functionAlias(getCurrentPartition, "partition"),
     new host.functionAlias(getVpsList, "vps"),
     new host.functionAlias(getVmcsAddressesList, "vmcslist")
   ];
