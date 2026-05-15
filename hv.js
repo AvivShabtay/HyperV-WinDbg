@@ -89,14 +89,14 @@ function getCurrentVtlNumber() {
 // returns a HV_VP structure representing a virtual processor
 function getCurrentVirtualProcessor() {
   const gsBase = getGsBase();
-  const vp_address = u64(gsBase.add(VIRTUAL_PROCESSOR_OFFSET_FROM_GS_BASE));
+  const vp_address = u64(gsBase.add(HV_GS_CURRENT_VIRTUAL_PROCESSOR_OFFSET));
   return vp_address;
 }
 
 // Returns a HV_VTL structure (represeting a VTL) base address
 function getCurrentVtl() {
   const gsBase = getGsBase();
-  const vp_address = u64(gsBase.add(VIRTUAL_PROCESSOR_OFFSET_FROM_GS_BASE));
+  const vp_address = u64(gsBase.add(HV_GS_CURRENT_VIRTUAL_PROCESSOR_OFFSET));
   const vtl = u64(vp_address.add(VTL_OFFSET_FROM_VIRTUAL_PROCESSOR));
   return vtl;
 }
