@@ -67,6 +67,14 @@ const u32 = (x) => host.memory.readMemoryValues(x, 1, 4)[0];
 const u64 = (x) => host.memory.readMemoryValues(x, 1, 8)[0];
 const u128 = (x) => host.memory.readMemoryValues(x, 1, 16)[0];
 
+function read16(x, phy = false) {
+  if (phy) {
+    x = host.memory.physicalAddress(x);
+  }
+
+  return u16(x);
+}
+
 function read64(x, phy = false) {
   if (phy) {
     x = host.memory.physicalAddress(x);
@@ -239,6 +247,46 @@ function gpa2Hpa(gpa) {
   // 4KB page
   const pte = new EptEntry(read64(pde.entry(address.ptIndex), true));
   return pte.raw.bitwiseAnd(PFN_MASK).bitwiseOr(gpa.bitwiseAnd(0xfff));
+}
+
+function v2p(cr3, va) {
+  const vtopOutput = system(`!vtop 0x${cr3.toString(16)} 0x${va.toString(16)}`);
+  for (let line of vtopOutput) {
+    if (line.includes("Mapped phys")) {
+      return host.parseInt64(`0x${line.split(" ")[3].toString(16)}`);
+    }
+  }
+}
+
+function findModuleBaseAddress() {
+  const CHUNK_SIZE = 0x1000; // PAGE_SIZE
+  const NUM_OF_PAGES_IN_1MB = 256;
+
+  // Find the guest return address by reading the guest top of the stack:
+  let guestRspVirtAddr = getCurrentVmcs().GuestRsp;
+  let guestCr3PhysAddr = getCurrentVmcs().GuestCr3;
+  let guestRspPhysAddr = v2p(guestCr3PhysAddr, guestRspVirtAddr);
+  let guestReturnAddrVirtAddr = asUint64(read64(guestRspPhysAddr, true));
+  let guestSymbolAligned = guestReturnAddrVirtAddr.bitwiseAnd(0xFFFFFFFFFFFFF000);
+
+  // Now that we have an address in the guest memory space,
+  // We can search for the guest module base address.
+  
+  // Find the guest module base address.
+  let currentVirtAddr = guestSymbolAligned;
+  for (let i = 0; i < NUM_OF_PAGES_IN_1MB; i++) {
+    let currentPhysAddress = v2p(guestCr3PhysAddr, currentVirtAddr);
+    let tempPeMagic = read16(currentPhysAddress, true);
+    if (tempPeMagic == 0x5a4d) { // 'MZ'
+      return {
+        "virtAddr": currentVirtAddr, 
+        "physAddr": currentPhysAddress
+      };
+    }
+
+    currentVirtAddr = currentVirtAddr.subtract(CHUNK_SIZE);
+  }
+  return None;
 }
 
 function printUsage() {
