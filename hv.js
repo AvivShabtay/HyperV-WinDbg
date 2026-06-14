@@ -56,13 +56,23 @@ const VMCS_INFO_STRUCTURE_OFFSET_FROM_VTL_STATE_REGION = 0x28;
 const VMCS_VIRTUAL_ADDRESS_OFFSET_FROM_VMCS_INFO_STRUCTURE = 0x180;
 const VMCS_PHYSICAL_ADDRESS_OFFSET_FROM_VMCS_INFO_STRUCTURE = 0x188;
 
-// Memory constants
+// Memory
 const PFN_MASK = 0x000fffffffff000;
 const PFN_MASK_2M = 0x000ffffffe00000;
 const PFN_MASK_1G = 0x000ffffffc00000;
 const PAGE_SIZE = 0x1000;
 const PAGE_MASK = host.Int64(PAGE_SIZE - 1).bitwiseNot();
 const ONE_MB = 1 << 20;
+
+// PE
+const NT_IMAGE_NAMES = new Set([
+  "ntoskrnl", // UP (uniprocessor), no PAE
+  "ntkrnlpa", // UP + PAE
+  "ntkrnlmp", // MP (multiprocessor), no PAE
+  "ntkrpamp", // MP + PAE
+  "ntkrnlmp", // MP x64
+]);
+const IMAGE_DOS_MAGIC = 0x5a4d;
 
 // Read memory utilities
 const u8 = (x) => host.memory.readMemoryValues(x, 1, 1)[0];
@@ -395,14 +405,73 @@ function v2p(cr3, va) {
     if (line.includes("Mapped phys")) {
       return host.parseInt64(`0x${line.split(" ")[3].toString(16)}`);
     }
+    if (line.includes("Large page mapped phys")) {
+      return host.parseInt64(`0x${line.split(" ")[5].toString(16)}`);
+    }
   }
   return null;
 }
 
 /**
+  Wrapper for all the information about the module PE header.
+  Assumes virtual memory of the module is available (`.context ....` was called).
+*/
+class PeHeaders {
+  constructor(moduleBaseVirtAddress) {
+    this.imageBase = asUint64(moduleBaseVirtAddress);
+
+    const headers = system(`!dh 0x${moduleBaseVirtAddress.toString(16)}`);
+    this.imageSize = parseInt(this.__getImageSize(headers), 16);
+    this.symbolFilename = this.__symbolFilename(headers);
+  }
+
+  __findInfo(headersDump, textToSearch, offsetToValue) {
+    for (let line of headersDump) {
+      if (line.includes(textToSearch)) {
+        return line.split(" ")[offsetToValue];
+      }
+    }
+  }
+
+  __getImageSize(headersDump) {
+    for (let line of headersDump) {
+      if (line.includes("size of image")) {
+        const m = line.match(/^\s*([0-9a-fA-F]+)\s+size of image/i);
+        return m ? m[1] : null;
+      }
+    }
+  }
+
+  __symbolFilename(headersDump) {
+    for (let line of headersDump) {
+      const m = line.match(
+        /Format:\s*RSDS\s*,\s*\S+\s*,\s*\d+\s*,\s*(\S+\.pdb)/i,
+      );
+      if (m) return m[1].replace(/\.[^.]+$/, ""); //stripExtension
+    }
+  }
+
+  // TODO: Make it work.
+  contains(modulePcVirtAddress) {
+    return (
+      this.imageBase.add(this.imageSize) > asUint64(modulePcVirtAddress) &&
+      this.imageBase <= asUint64(modulePcVirtAddress)
+    );
+  }
+
+  reload() {
+    let moduleName = this.symbolFilename;
+    if (NT_IMAGE_NAMES.has(this.symbolFilename)) {
+      moduleName = "nt";
+    }
+    system(`.reload /f ${moduleName}=0x${this.imageBase.toString(16)}`);
+  }
+}
+
+/**
   Returns the current guest image base virtual and physical addresses.
 */
-function findGuestModuleBaseAddress() {
+function findGuestModuleInfo() {
   const CHUNK_SIZE = PAGE_SIZE;
   const NUM_OF_PAGES_IN_1MB = ONE_MB / 256;
 
@@ -426,9 +495,15 @@ function findGuestModuleBaseAddress() {
       return `[-] Probably Got invalid PTE for VA=0x${currentVirtAddr.toString(16)}`;
     }
     let tempPeMagic = read16(currentPhysAddress, true);
-    if (tempPeMagic == 0x5a4d) {
-      // 'MZ'
-      return new Address(currentVirtAddr, guestCr3PhysAddr, currentPhysAddress);
+    // 'MZ'
+    if (tempPeMagic == IMAGE_DOS_MAGIC) {
+      system(`.context 0x${guestCr3PhysAddr.toString(16)}`);
+      const peInfo = new PeHeaders(currentVirtAddr);
+
+      // We assume a valid guest image will have a PDB file.
+      if (peInfo.symbolFilename) {
+        return peInfo;
+      }
     }
 
     currentVirtAddr = currentVirtAddr.subtract(CHUNK_SIZE);
@@ -447,7 +522,10 @@ class Guest {
     this.cr4 = new CR4(currentVmcs.GuestCr4);
     this.dr7 = new DR7(currentVmcs.GuestDr7);
     this.idtrBase = currentVmcs.GuestIdtrBase;
-    this.imageBase = findGuestModuleBaseAddress();
+
+    this.__modulePeHeadersInfo = findGuestModuleInfo();
+    this.__modulePeHeadersInfo.reload();
+    this.imageBase = this.__modulePeHeadersInfo.imageBase;
 
     this.toString = () => {
       return `RIP = 0x${this.rip.toString(16)}`;
@@ -487,7 +565,9 @@ function printUsage() {
   log(
     "   !vmcslist       - Prints a list of all VMCSes Virtual and Physical addresses",
   );
-  log("   !guest          - Prints information about the guest VM");
+  log(
+    "   !guest          - Prints information about the guest VM and loads its symbols",
+  );
 }
 
 function initializeScript() {
