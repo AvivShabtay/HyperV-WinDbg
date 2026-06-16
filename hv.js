@@ -315,6 +315,14 @@ function getCurrentVmcs() {
   );
 }
 
+function getVmcsInfo(vmcs) {
+  loadHyperVTypes();
+  return host.namespace.Debugger.Utility.Analysis.SyntheticTypes.CreateInstance(
+    "HV_VMX_ENLIGHTENED_VMCS",
+    vmcs,
+  );
+}
+
 function getCurrentEptPointer() {
   const currentVmcs = getCurrentVmcs();
   const eptRoot = currentVmcs.EptRoot;
@@ -505,5 +513,6 @@ function initializeScript() {
     new host.functionAlias(getVpsList, "vps"),
     new host.functionAlias(getVmcsAddressesList, "vmcslist"),
     new host.functionAlias(getGuestInfo, "guest"),
+    new host.functionAlias(getVmcsInfo, "vmcsinfo"),
   ];
 }
