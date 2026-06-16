@@ -47,6 +47,7 @@ const VTL_OFFSET_FROM_VIRTUAL_PROCESSOR = 0x3c0;
 
 // For 24H2 (Potentially also 25H2)
 const VTL_ARRAY_OFFSET_FROM_VIRTUAL_PROCESSOR = 0x148;
+const VTL_NUMBER_OFFSET_FROM_VTL = 0x14;
 const HV_PARTITION_OFFSET_FROM_GS_BASE = 0x360;
 const VP_ARRAY_OFFSET_FROM_HV_PARTITION = 0x1e0;
 const NUMBER_OF_VPS_OFFSET_FROM_HV_PARTITION = 0x1d0; // Holds the number of VPs under partition
@@ -212,7 +213,9 @@ function getGsBase() {
 function getCurrentVtlNumber() {
   const gsBase = getGsBase();
   const vp_address = u64(gsBase.add(HV_GS_CURRENT_VIRTUAL_PROCESSOR_OFFSET));
-  const vtl_number = u8(vp_address.add(VTL_OFFSET_FROM_VIRTUAL_PROCESSOR));
+  const vtl_address = u64(vp_address.add(VTL_OFFSET_FROM_VIRTUAL_PROCESSOR));
+  const vtl_number = u8(vtl_address.add(VTL_NUMBER_OFFSET_FROM_VTL));
+
   return vtl_number;
 }
 
@@ -325,6 +328,14 @@ function getCurrentVmcs() {
   );
 }
 
+function getVmcsInfo(vmcs) {
+  loadHyperVTypes();
+  return host.namespace.Debugger.Utility.Analysis.SyntheticTypes.CreateInstance(
+    "HV_VMX_ENLIGHTENED_VMCS",
+    vmcs,
+  );
+}
+
 function getCurrentEptPointer() {
   const currentVmcs = getCurrentVmcs();
   const eptRoot = currentVmcs.EptRoot;
@@ -356,8 +367,43 @@ class EptEntry {
     return !(this.raw.bitwiseAnd(0x7) == 0);
   }
 
+  // TODO: It seems that there's no way to differentiate between Large Page or Huge Page
+  // Both page tables (2MB and 1GB) requires bit 7 to be set in order - There need to be an
+  // a page level counter, that if equals to 2 (PDPTE), and bit index 7 is 1, maps a 2GB (Huge) page
+  // or if page level counter equals to 3 (PDE), and bit index 7 is 1, maps a 1MB (Large) page   
+  //isHugePage() {
+  //  return !(this.raw.bitwiseAnd(0x80) == 0);
+  //}
+
   isLargePage() {
     return !(this.raw.bitwiseAnd(0x80) == 0);
+  }
+
+  isReadable()
+  {
+    return !(this.raw.bitwiseAnd(0x1) == 0);
+  }
+
+  isWritable()
+  {
+    return !(this.raw.bitwiseAnd(0x2) == 0); 
+  }
+
+  isExecutable()
+  {
+    return !(this.raw.bitwiseAnd(0x4) == 0);
+  }
+
+  // Relevant only if MBEC is enabled.
+  // MBEC bit is enabled after being supported both in VSM (VSM registers for each VTL)
+  // and in MBEC-support bit in the VM-Execution Control 
+  isUserModeExecutable()
+  {
+    // TODO:
+    // It would be more accurate if there will be a check that tells tells whether MBEC is enabled,
+    // both in VSM-related virtual registers and in VM-Execution control
+    // User-Mode Executable is at bit index 10 on EPT entry
+    return !(this.raw.bitwiseAnd(0x400) == 0); 
   }
 
   entry(index) {
@@ -365,7 +411,8 @@ class EptEntry {
   }
 }
 
-function gpa2Hpa(gpa) {
+function getSpaPageEntry(gpa)
+{
   const address = new Address(gpa);
 
   const pml4 = new EptEntry(getCurrentEptPointer());
@@ -374,25 +421,58 @@ function gpa2Hpa(gpa) {
   const pdpt = new EptEntry(read64(pml4.entry(address.pml4Index), true));
   if (!pdpt.isPresent()) return;
 
+  //1GB huge page
+  //if (pdpt.isHugePage()) {
+  //  return pd;
+  //}
+
   const pd = new EptEntry(read64(pdpt.entry(address.pdptIndex), true));
   if (!pd.isPresent()) return;
-
-  // 1GB huge page
-  if (pd.isLargePage()) {
-    return pd.raw.bitwiseAnd(PFN_MASK_1G).bitwiseOr(gpa.bitwiseAnd(0x3fffffff));
-  }
 
   const pde = new EptEntry(read64(pd.entry(address.pdIndex), true));
   if (!pde.isPresent()) return;
 
   // 2MB large page
   if (pde.isLargePage()) {
-    return pde.raw.bitwiseAnd(PFN_MASK_2M).bitwiseOr(gpa.bitwiseAnd(0x1fffff));
+    return pde;
   }
 
-  // 4KB page
   const pte = new EptEntry(read64(pde.entry(address.ptIndex), true));
-  return pte.raw.bitwiseAnd(PFN_MASK).bitwiseOr(gpa.bitwiseAnd(0xfff));
+  return pte;
+}
+
+function gpa2Hpa(gpa)
+{
+  const pageEntry = getSpaPageEntry(gpa);
+  
+  // First, there's need to be a fix to the TODO within the isHugePage() method
+  // then it will be uncommented.
+  //if(pageEntry.isHugePage())
+  //{
+  //  return pageEntry.raw.bitwiseAnd(PFN_MASK_1G).bitwiseOr(gpa.bitwiseAnd(0x3fffffff));
+  //}
+  
+  if (pageEntry.isLargePage())
+  {
+    return pageEntry.raw.bitwiseAnd(PFN_MASK_2M).bitwiseOr(gpa.bitwiseAnd(0x1fffff));
+  }
+
+  return pageEntry.raw.bitwiseAnd(PFN_MASK).bitwiseOr(gpa.bitwiseAnd(0xfff));
+}
+
+// SPA = System Physical Address
+function getSpaPermissionsFromGpa(gpa)
+{
+  const spa = gpa2Hpa(gpa);
+  log(`[*] EPT page permissions for SPA: 0x${spa.toString(16)}`);
+
+  const pageEntry = getSpaPageEntry(gpa);
+
+  log(`\t[*] SPA Page Entry value: ${pageEntry.raw}`);
+  log(`\t[*] Readable: ${pageEntry.isReadable()}`);
+  log(`\t[*] Writable: ${pageEntry.isWritable()}`);
+  log(`\t[*] Executable: ${pageEntry.isExecutable()}`);
+  log(`\t[*] User-Mode Executable: ${pageEntry.isUserModeExecutable()}`);
 }
 
 /**
@@ -542,31 +622,37 @@ function getGuestInfo() {
 
 function printUsage() {
   log(" HyperV Research Tools:");
-  log("   !gpa2hpa <gpa>  - Translates GPA to SPA");
+  log("   !gpa2hpa <gpa>      - Translates GPA to SPA");
   log(
-    "   !vmcs           - Prints the current active VMCS base address on logical processor",
+    "   !vmcs               - Prints the current active VMCS base address on logical processor",
   );
-  log("   !vtlnumber      - Prints the active VTL's VTL number");
+  log("   !vtlnumber          - Prints the active VTL's VTL number");
   log(
-    "   !currentvp      - Prints the current Virtual Processor's HV_VP data structure base address",
-  );
-  log(
-    "   !partition      - Prints the current partition's HV_PARTITION data structure base address",
+    "   !currentvp          - Prints the current Virtual Processor's HV_VP data structure base address",
   );
   log(
-    "   !currentvtl     - Prints the current VTL's HV_VTL data structure base address",
+    "   !partition          - Prints the current partition's HV_PARTITION data structure base address",
   );
   log(
-    "   !vtls           - Prints all the existing VTL's HV_VTL data structure base addresses",
+    "   !currentvtl         - Prints the current VTL's HV_VTL data structure base address",
   );
   log(
-    "   !vps            - Prints all the existing VPs HV_VP data structure base addresses",
+    "   !vtls               - Prints all the existing VTL's HV_VTL data structure base addresses",
   );
   log(
-    "   !vmcslist       - Prints a list of all VMCSes Virtual and Physical addresses",
+    "   !vps                - Prints all the existing VPs HV_VP data structure base addresses",
   );
   log(
-    "   !guest          - Prints information about the guest VM and loads its symbols",
+    "   !vmcslist           - Prints a list of all VMCSes Virtual and Physical addresses",
+  );
+  log(
+    "   !guest              - Prints information about the guest VM and loads its symbols",
+  );
+  log(
+    "   !vmcsinfo           - Prints information about VMCS of a given VMCS Virtual Address",
+  );
+  log(
+    "   !permissions <gpa>  - Prints information EPT Permissions of a given GPA",
   );
 }
 
@@ -585,5 +671,7 @@ function initializeScript() {
     new host.functionAlias(getVpsList, "vps"),
     new host.functionAlias(getVmcsAddressesList, "vmcslist"),
     new host.functionAlias(getGuestInfo, "guest"),
+    new host.functionAlias(getVmcsInfo, "vmcsinfo"),
+    new host.functionAlias(getSpaPermissionsFromGpa, "permissions"),
   ];
 }
