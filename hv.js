@@ -47,6 +47,7 @@ const VTL_OFFSET_FROM_VIRTUAL_PROCESSOR = 0x3c0;
 
 // For 24H2 (Potentially also 25H2)
 const VTL_ARRAY_OFFSET_FROM_VIRTUAL_PROCESSOR = 0x148;
+const VTL_NUMBER_OFFSET_FROM_VTL = 0x14;
 const HV_PARTITION_OFFSET_FROM_GS_BASE = 0x360;
 const VP_ARRAY_OFFSET_FROM_HV_PARTITION = 0x1e0;
 const NUMBER_OF_VPS_OFFSET_FROM_HV_PARTITION = 0x1d0; // Holds the number of VPs under partition
@@ -212,7 +213,9 @@ function getGsBase() {
 function getCurrentVtlNumber() {
   const gsBase = getGsBase();
   const vp_address = u64(gsBase.add(HV_GS_CURRENT_VIRTUAL_PROCESSOR_OFFSET));
-  const vtl_number = u8(vp_address.add(VTL_OFFSET_FROM_VIRTUAL_PROCESSOR));
+  const vtl_address = u64(vp_address.add(VTL_OFFSET_FROM_VIRTUAL_PROCESSOR));
+  const vtl_number = u8(vtl_address.add(VTL_NUMBER_OFFSET_FROM_VTL));
+
   return vtl_number;
 }
 
@@ -418,13 +421,13 @@ function getSpaPageEntry(gpa)
   const pdpt = new EptEntry(read64(pml4.entry(address.pml4Index), true));
   if (!pdpt.isPresent()) return;
 
+  //1GB huge page
+  //if (pdpt.isHugePage()) {
+  //  return pd;
+  //}
+
   const pd = new EptEntry(read64(pdpt.entry(address.pdptIndex), true));
   if (!pd.isPresent()) return;
-
-  // 1GB huge page
-  if (pd.isLargePage()) {
-    return pd;
-  }
 
   const pde = new EptEntry(read64(pd.entry(address.pdIndex), true));
   if (!pde.isPresent()) return;
