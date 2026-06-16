@@ -56,13 +56,23 @@ const VMCS_INFO_STRUCTURE_OFFSET_FROM_VTL_STATE_REGION = 0x28;
 const VMCS_VIRTUAL_ADDRESS_OFFSET_FROM_VMCS_INFO_STRUCTURE = 0x180;
 const VMCS_PHYSICAL_ADDRESS_OFFSET_FROM_VMCS_INFO_STRUCTURE = 0x188;
 
-// Memory constants
+// Memory
 const PFN_MASK = 0x000fffffffff000;
 const PFN_MASK_2M = 0x000ffffffe00000;
 const PFN_MASK_1G = 0x000ffffffc00000;
 const PAGE_SIZE = 0x1000;
 const PAGE_MASK = host.Int64(PAGE_SIZE - 1).bitwiseNot();
 const ONE_MB = 1 << 20;
+
+// PE
+const NT_IMAGE_NAMES = new Set([
+  "ntoskrnl", // UP (uniprocessor), no PAE
+  "ntkrnlpa", // UP + PAE
+  "ntkrnlmp", // MP (multiprocessor), no PAE
+  "ntkrpamp", // MP + PAE
+  "ntkrnlmp", // MP x64
+]);
+const IMAGE_DOS_MAGIC = 0x5a4d;
 
 // Read memory utilities
 const u8 = (x) => host.memory.readMemoryValues(x, 1, 1)[0];
@@ -354,8 +364,43 @@ class EptEntry {
     return !(this.raw.bitwiseAnd(0x7) == 0);
   }
 
+  // TODO: It seems that there's no way to differentiate between Large Page or Huge Page
+  // Both page tables (2MB and 1GB) requires bit 7 to be set in order - There need to be an
+  // a page level counter, that if equals to 2 (PDPTE), and bit index 7 is 1, maps a 2GB (Huge) page
+  // or if page level counter equals to 3 (PDE), and bit index 7 is 1, maps a 1MB (Large) page   
+  //isHugePage() {
+  //  return !(this.raw.bitwiseAnd(0x80) == 0);
+  //}
+
   isLargePage() {
     return !(this.raw.bitwiseAnd(0x80) == 0);
+  }
+
+  isReadable()
+  {
+    return !(this.raw.bitwiseAnd(0x1) == 0);
+  }
+
+  isWritable()
+  {
+    return !(this.raw.bitwiseAnd(0x2) == 0); 
+  }
+
+  isExecutable()
+  {
+    return !(this.raw.bitwiseAnd(0x4) == 0);
+  }
+
+  // Relevant only if MBEC is enabled.
+  // MBEC bit is enabled after being supported both in VSM (VSM registers for each VTL)
+  // and in MBEC-support bit in the VM-Execution Control 
+  isUserModeExecutable()
+  {
+    // TODO:
+    // It would be more accurate if there will be a check that tells tells whether MBEC is enabled,
+    // both in VSM-related virtual registers and in VM-Execution control
+    // User-Mode Executable is at bit index 10 on EPT entry
+    return !(this.raw.bitwiseAnd(0x400) == 0); 
   }
 
   entry(index) {
@@ -363,7 +408,8 @@ class EptEntry {
   }
 }
 
-function gpa2Hpa(gpa) {
+function getSpaPageEntry(gpa)
+{
   const address = new Address(gpa);
 
   const pml4 = new EptEntry(getCurrentEptPointer());
@@ -377,7 +423,7 @@ function gpa2Hpa(gpa) {
 
   // 1GB huge page
   if (pd.isLargePage()) {
-    return pd.raw.bitwiseAnd(PFN_MASK_1G).bitwiseOr(gpa.bitwiseAnd(0x3fffffff));
+    return pd;
   }
 
   const pde = new EptEntry(read64(pd.entry(address.pdIndex), true));
@@ -385,12 +431,45 @@ function gpa2Hpa(gpa) {
 
   // 2MB large page
   if (pde.isLargePage()) {
-    return pde.raw.bitwiseAnd(PFN_MASK_2M).bitwiseOr(gpa.bitwiseAnd(0x1fffff));
+    return pde;
   }
 
-  // 4KB page
   const pte = new EptEntry(read64(pde.entry(address.ptIndex), true));
-  return pte.raw.bitwiseAnd(PFN_MASK).bitwiseOr(gpa.bitwiseAnd(0xfff));
+  return pte;
+}
+
+function gpa2Hpa(gpa)
+{
+  const pageEntry = getSpaPageEntry(gpa);
+  
+  // First, there's need to be a fix to the TODO within the isHugePage() method
+  // then it will be uncommented.
+  //if(pageEntry.isHugePage())
+  //{
+  //  return pageEntry.raw.bitwiseAnd(PFN_MASK_1G).bitwiseOr(gpa.bitwiseAnd(0x3fffffff));
+  //}
+  
+  if (pageEntry.isLargePage())
+  {
+    return pageEntry.raw.bitwiseAnd(PFN_MASK_2M).bitwiseOr(gpa.bitwiseAnd(0x1fffff));
+  }
+
+  return pageEntry.raw.bitwiseAnd(PFN_MASK).bitwiseOr(gpa.bitwiseAnd(0xfff));
+}
+
+// SPA = System Physical Address
+function getSpaPermissionsFromGpa(gpa)
+{
+  const spa = gpa2Hpa(gpa);
+  log(`[*] EPT page permissions for SPA: 0x${spa.toString(16)}`);
+
+  const pageEntry = getSpaPageEntry(gpa);
+
+  log(`\t[*] SPA Page Entry value: ${pageEntry.raw}`);
+  log(`\t[*] Readable: ${pageEntry.isReadable()}`);
+  log(`\t[*] Writable: ${pageEntry.isWritable()}`);
+  log(`\t[*] Executable: ${pageEntry.isExecutable()}`);
+  log(`\t[*] User-Mode Executable: ${pageEntry.isUserModeExecutable()}`);
 }
 
 /**
@@ -403,14 +482,73 @@ function v2p(cr3, va) {
     if (line.includes("Mapped phys")) {
       return host.parseInt64(`0x${line.split(" ")[3].toString(16)}`);
     }
+    if (line.includes("Large page mapped phys")) {
+      return host.parseInt64(`0x${line.split(" ")[5].toString(16)}`);
+    }
   }
   return null;
 }
 
 /**
+  Wrapper for all the information about the module PE header.
+  Assumes virtual memory of the module is available (`.context ....` was called).
+*/
+class PeHeaders {
+  constructor(moduleBaseVirtAddress) {
+    this.imageBase = asUint64(moduleBaseVirtAddress);
+
+    const headers = system(`!dh 0x${moduleBaseVirtAddress.toString(16)}`);
+    this.imageSize = parseInt(this.__getImageSize(headers), 16);
+    this.symbolFilename = this.__symbolFilename(headers);
+  }
+
+  __findInfo(headersDump, textToSearch, offsetToValue) {
+    for (let line of headersDump) {
+      if (line.includes(textToSearch)) {
+        return line.split(" ")[offsetToValue];
+      }
+    }
+  }
+
+  __getImageSize(headersDump) {
+    for (let line of headersDump) {
+      if (line.includes("size of image")) {
+        const m = line.match(/^\s*([0-9a-fA-F]+)\s+size of image/i);
+        return m ? m[1] : null;
+      }
+    }
+  }
+
+  __symbolFilename(headersDump) {
+    for (let line of headersDump) {
+      const m = line.match(
+        /Format:\s*RSDS\s*,\s*\S+\s*,\s*\d+\s*,\s*(\S+\.pdb)/i,
+      );
+      if (m) return m[1].replace(/\.[^.]+$/, ""); //stripExtension
+    }
+  }
+
+  // TODO: Make it work.
+  contains(modulePcVirtAddress) {
+    return (
+      this.imageBase.add(this.imageSize) > asUint64(modulePcVirtAddress) &&
+      this.imageBase <= asUint64(modulePcVirtAddress)
+    );
+  }
+
+  reload() {
+    let moduleName = this.symbolFilename;
+    if (NT_IMAGE_NAMES.has(this.symbolFilename)) {
+      moduleName = "nt";
+    }
+    system(`.reload /f ${moduleName}=0x${this.imageBase.toString(16)}`);
+  }
+}
+
+/**
   Returns the current guest image base virtual and physical addresses.
 */
-function findGuestModuleBaseAddress() {
+function findGuestModuleInfo() {
   const CHUNK_SIZE = PAGE_SIZE;
   const NUM_OF_PAGES_IN_1MB = ONE_MB / 256;
 
@@ -434,9 +572,15 @@ function findGuestModuleBaseAddress() {
       return `[-] Probably Got invalid PTE for VA=0x${currentVirtAddr.toString(16)}`;
     }
     let tempPeMagic = read16(currentPhysAddress, true);
-    if (tempPeMagic == 0x5a4d) {
-      // 'MZ'
-      return new Address(currentVirtAddr, guestCr3PhysAddr, currentPhysAddress);
+    // 'MZ'
+    if (tempPeMagic == IMAGE_DOS_MAGIC) {
+      system(`.context 0x${guestCr3PhysAddr.toString(16)}`);
+      const peInfo = new PeHeaders(currentVirtAddr);
+
+      // We assume a valid guest image will have a PDB file.
+      if (peInfo.symbolFilename) {
+        return peInfo;
+      }
     }
 
     currentVirtAddr = currentVirtAddr.subtract(CHUNK_SIZE);
@@ -455,7 +599,10 @@ class Guest {
     this.cr4 = new CR4(currentVmcs.GuestCr4);
     this.dr7 = new DR7(currentVmcs.GuestDr7);
     this.idtrBase = currentVmcs.GuestIdtrBase;
-    this.imageBase = findGuestModuleBaseAddress();
+
+    this.__modulePeHeadersInfo = findGuestModuleInfo();
+    this.__modulePeHeadersInfo.reload();
+    this.imageBase = this.__modulePeHeadersInfo.imageBase;
 
     this.toString = () => {
       return `RIP = 0x${this.rip.toString(16)}`;
@@ -472,30 +619,38 @@ function getGuestInfo() {
 
 function printUsage() {
   log(" HyperV Research Tools:");
-  log("   !gpa2hpa <gpa>  - Translates GPA to SPA");
+  log("   !gpa2hpa <gpa>      - Translates GPA to SPA");
   log(
-    "   !vmcs           - Prints the current active VMCS base address on logical processor",
+    "   !vmcs               - Prints the current active VMCS base address on logical processor",
   );
-  log("   !vtlnumber      - Prints the active VTL's VTL number");
+  log("   !vtlnumber          - Prints the active VTL's VTL number");
   log(
-    "   !currentvp      - Prints the current Virtual Processor's HV_VP data structure base address",
-  );
-  log(
-    "   !partition      - Prints the current partition's HV_PARTITION data structure base address",
+    "   !currentvp          - Prints the current Virtual Processor's HV_VP data structure base address",
   );
   log(
-    "   !currentvtl     - Prints the current VTL's HV_VTL data structure base address",
+    "   !partition          - Prints the current partition's HV_PARTITION data structure base address",
   );
   log(
-    "   !vtls           - Prints all the existing VTL's HV_VTL data structure base addresses",
+    "   !currentvtl         - Prints the current VTL's HV_VTL data structure base address",
   );
   log(
-    "   !vps            - Prints all the existing VPs HV_VP data structure base addresses",
+    "   !vtls               - Prints all the existing VTL's HV_VTL data structure base addresses",
   );
   log(
-    "   !vmcslist       - Prints a list of all VMCSes Virtual and Physical addresses",
+    "   !vps                - Prints all the existing VPs HV_VP data structure base addresses",
   );
-  log("   !guest          - Prints information about the guest VM");
+  log(
+    "   !vmcslist           - Prints a list of all VMCSes Virtual and Physical addresses",
+  );
+  log(
+    "   !guest              - Prints information about the guest VM and loads its symbols",
+  );
+  log(
+    "   !vmcsinfo           - Prints information about VMCS of a given VMCS Virtual Address",
+  );
+  log(
+    "   !permissions <gpa>  - Prints information EPT Permissions of a given GPA",
+  );
 }
 
 function initializeScript() {
@@ -514,5 +669,6 @@ function initializeScript() {
     new host.functionAlias(getVmcsAddressesList, "vmcslist"),
     new host.functionAlias(getGuestInfo, "guest"),
     new host.functionAlias(getVmcsInfo, "vmcsinfo"),
+    new host.functionAlias(getSpaPermissionsFromGpa, "permissions"),
   ];
 }
