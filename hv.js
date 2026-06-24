@@ -511,6 +511,27 @@ function findGuestModuleInfo() {
   return None;
 }
 
+function getGuestCallStack() {
+  const currentRip = host.currentThread.Registers.User.rip;
+  const currentRsp = host.currentThread.Registers.User.rsp;
+
+  const currentVmcs = getCurrentVmcs();
+  const guestRip = currentVmcs.GuestRip;
+  const guestRsp = currentVmcs.GuestRsp;
+  const guestCr3 = currentVmcs.GuestCr3;
+
+  system(`.context 0x${guestCr3.toString(16)}`);
+  system(`r rip=0x${guestRip.toString(16)}`);
+  system(`r rsp=0x${guestRsp.toString(16)}`);
+
+  const guestCallStack = system("k");
+
+  system(`r rip=0x${currentRip.toString(16)}`);
+  system(`r rsp=0x${currentRsp.toString(16)}`);
+
+  return guestCallStack;
+}
+
 class Guest {
   constructor() {
     const currentVmcs = getCurrentVmcs();
@@ -522,10 +543,13 @@ class Guest {
     this.cr4 = new CR4(currentVmcs.GuestCr4);
     this.dr7 = new DR7(currentVmcs.GuestDr7);
     this.idtrBase = currentVmcs.GuestIdtrBase;
+    this.gs = currentVmcs.GuestGsBase;
 
     this.__modulePeHeadersInfo = findGuestModuleInfo();
     this.__modulePeHeadersInfo.reload();
     this.imageBase = this.__modulePeHeadersInfo.imageBase;
+
+    this.callStack = getGuestCallStack();
 
     this.toString = () => {
       return `RIP = 0x${this.rip.toString(16)}`;
